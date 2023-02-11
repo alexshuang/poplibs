@@ -132,14 +132,16 @@ bool createCSRMatrixFromMaskFile(const std::string &fileName,
 int main(int argc, char **argv) try {
   namespace po = boost::program_options;
 
-  DeviceType deviceType = DeviceType::IpuModel2;
+  // DeviceType deviceType = DeviceType::IpuModel2;
+  DeviceType deviceType = DeviceType::Hw;
   constexpr unsigned numIPUs = 1;
   boost::optional<unsigned> tilesPerIPU;
   boost::optional<unsigned> numBands;
   boost::optional<std::string> profileDir;
   boost::optional<unsigned> nSplit;
-  boost::optional<double> availableMemoryProportion;
+  double availableMemoryProportion = -1;
   unsigned groups = 1, n;
+  unsigned iters = 1000000;
   boost::optional<unsigned> m, k;
   double sparsityFactor = 0.1;
   Type dataType = HALF;
@@ -182,6 +184,8 @@ int main(int argc, char **argv) try {
     ("m", po::value(&m), "Rows in left-hand operand (optional if sparsity file is specified")
     ("k", po::value(&k), "Columns in left-hand operand/Rows in right-hand operand (optional if sparsity file is specified)")
     ("n", po::value(&n)->required(), "Columns in right-hand operand")
+    ("g", po::value(&groups)->default_value(groups), "groups of matmul")
+    ("iters", po::value(&iters)->default_value(iters), "device iteration count")
     ("sparsity-factor", po::value(&sparsityFactor)->default_value(sparsityFactor),
      "Proportion of elements of left-hand operand which are non-zero")
     ("block-length",  po::value(&blockLength)->default_value(blockLength), 
@@ -344,9 +348,10 @@ int main(int argc, char **argv) try {
   if (nSplit) {
     sparseOptionFlags.set("nSplit", std::to_string(*nSplit));
   }
-  if (availableMemoryProportion) {
+  if (!vm["available-memory-proportion"].empty()) {
+    std::cerr << "\nassign amp = " << availableMemoryProportion;
     sparseOptionFlags.set("availableMemoryProportion",
-                          std::to_string(*availableMemoryProportion));
+                          std::to_string(availableMemoryProportion));
   }
   if (verboseLogging) {
     sparseOptionFlags.set("verboseLogging", "true");
@@ -382,12 +387,18 @@ int main(int argc, char **argv) try {
                                                 csrMatrix, debugString,
                                                 sparseOptionFlags, &cache);
 
+  Sequence repeat_prog;
   auto out =
       doDenseSparse
-          ? static_::denseSparseMatMul(graph, dense, sparse, prog, false, false,
+          ? static_::denseSparseMatMul(graph, dense, sparse, repeat_prog, false, false,
                                        debugString, sparseOptionFlags, &cache)
-          : static_::sparseDenseMatMul(graph, sparse, dense, prog, false, false,
+          : static_::sparseDenseMatMul(graph, sparse, dense, repeat_prog, false, false,
                                        debugString, sparseOptionFlags, &cache);
+
+  prog.add(Repeat(iters, repeat_prog));
+  // prog.add(PrintTensor(out));
+  std::cerr << "\nhostOut shape: [" << out.dim(0) << ", " << out.dim(1) << ", "
+            << out.dim(2) << "]";
 
   std::vector<std::pair<std::string, HostMemory>> tmap;
   auto rawNzInfo =
@@ -398,12 +409,14 @@ int main(int argc, char **argv) try {
   auto rawOut = allocateHostMemoryForTensor(out, "out", graph, uploadProg,
                                             downloadProg, tmap);
 
+  /*
   const auto canUseCycleCountForDevice =
       isSimulator(deviceType) || isHw(deviceType);
   if (canUseCycleCountForDevice) {
     auto cycles = cycleCount(graph, prog, 0, SyncType::INTERNAL, "totalCycles");
     graph.createHostRead("cycles", cycles);
   }
+  */
 
   Sequence controlProg({std::move(uploadProg), std::move(prog)});
   controlProg.add(downloadProg);
@@ -442,17 +455,29 @@ int main(int argc, char **argv) try {
   copy(target, sparsityImpl.nzValues, dataType, rawNzInfo.get());
 
   device.bind([&](const Device &d) {
-    std::uint64_t cyclesBuffer;
-    engine.loadAndRun(d);
+    // std::uint64_t cyclesBuffer;
+    // engine.loadAndRun(d);
+    engine.load(d);
+    using namespace std::chrono;
+    auto start = system_clock::now();
+    engine.run(0);
+    auto end = system_clock::now();
+    uint64_t avg_elapsed_ns = duration_cast<nanoseconds>(end - start).count() / iters;
     double actSparsity =
         static_cast<double>(csrMatrix.nzValues.size()) / (*m * *k);
     std::cerr << "\nStatic sparsity: m " << *m << ", k " << *k << ", n " << n
               << ", block length " << blockLength << ", nz blocks "
               << csrMatrix.columnIndices.size() << ", dType " << dataType
-              << ", sparsity " << actSparsity;
+              << ", sparsity " << actSparsity << ", amp " << availableMemoryProportion 
+              << ", avg elapsed " << avg_elapsed_ns << " ns in " << iters << " loops";
+    std::cerr << "\nCSV format: static sparsity," << *m << "," << *k << "," << n
+              << "," << blockLength << "," << csrMatrix.columnIndices.size()
+              << "," << dataType << "," << actSparsity << ","
+              << availableMemoryProportion << "," << avg_elapsed_ns << "," << iters;
     if (maskFileUsed) {
       std::cerr << "(mask file = " << sparsityFileName << ")";
     }
+    /*
     if (canUseCycleCountForDevice) {
       engine.readTensor("cycles", &cyclesBuffer, &cyclesBuffer + 1);
       constexpr double freqGHz = 1.85;
@@ -461,6 +486,7 @@ int main(int argc, char **argv) try {
       std::cerr << ", total cycles: " << cyclesBuffer;
       std::cerr << ", TFlops/sec @" << freqGHz << "GHz = " << tFlops;
     }
+    */
     std::cerr << "\n";
   });
 
