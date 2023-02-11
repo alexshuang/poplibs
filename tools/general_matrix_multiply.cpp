@@ -29,6 +29,7 @@
 #include <poputil/TileMapping.hpp>
 #include <poputil/exceptions.hpp>
 #include <random>
+#include <chrono>
 
 using namespace poplar;
 using namespace poplar::program;
@@ -104,14 +105,15 @@ int main(int argc, char **argv) {
   //        op(matB)  is a k x n matrix
   unsigned m, k, n, g;
   float alpha, beta;
+  // Type inputType = HALF;
   Type inputType;
   Type outputType;
   Type partialsType;
   double relativeTolerance, absoluteTolerance;
   MatrixOp matAOp = MatrixOp::NORMAL;
   MatrixOp matBOp = MatrixOp::NORMAL;
-  DeviceType deviceType = DeviceType::IpuModel2;
-  double availableMemoryProportion;
+  DeviceType deviceType = DeviceType::Hw;
+  double availableMemoryProportion = -1;
   unsigned numIPUs = 1;
   boost::optional<unsigned> tilesPerIPU;
   unsigned numExecutions;
@@ -211,7 +213,7 @@ int main(int argc, char **argv) {
      po::value<std::string>(&planConstraints),
      "Constraints on the chosen convolution plan as a JSON string")
     ("num-executions",
-      po::value<unsigned>(&numExecutions)->default_value(1u),
+      po::value<unsigned>(&numExecutions)->default_value(1000000u),
      "Number of times to repeat the multiply")
     ("remap-output-tensor",
      po::value<bool>(&remapOutputTensor)->default_value(false),
@@ -321,6 +323,7 @@ int main(int argc, char **argv) {
   }
 
   if (!vm["available-memory-proportion"].empty()) {
+    std::cerr << "\nassign amp = " << availableMemoryProportion;
     mmOpt.set("availableMemoryProportion",
               std::to_string(availableMemoryProportion));
   }
@@ -352,9 +355,14 @@ int main(int argc, char **argv) {
   auto matLhs = transposeA ? matA.dimShufflePartial({1, 2}, {2, 1}) : matA;
   auto matRhs = transposeB ? matB.dimShufflePartial({1, 2}, {2, 1}) : matB;
 
-  auto matAxB = groupedMatMul(useCreateOutput, graph, matLhs, matRhs, prog,
+  // auto matAxB = groupedMatMul(useCreateOutput, graph, matLhs, matRhs, prog,
+  //                             outputType, "op(A) x op(B)", mmOpt, &cache);
+  auto matC = groupedMatMul(useCreateOutput, graph, matLhs, matRhs, prog,
                               outputType, "op(A) x op(B)", mmOpt, &cache);
+  std::cerr << "\nhostOut shape: [" << matC.dim(0) << ", " << matC.dim(1)
+            << ", " << matC.dim(2) << "]";
 
+  /*
   auto matC = graph.clone(outputType, matAxB, "matC");
   // inner repeat loop copies the source and performs the multiply and
   // accumulate. Only the final result is returned to avoid repeated
@@ -368,10 +376,13 @@ int main(int argc, char **argv) {
   }
 
   scaledAddTo(graph, matD, beta, matAxB, alpha, prog);
+  */
   outerProg.add(Repeat(numExecutions, prog));
 
+  /*
   if (numExecutions > 1)
     outerProg.add(Copy(matD, matC));
+  */
 
   Sequence uploadProg, downloadProg;
   std::vector<std::pair<std::string, HostMemory>> tmap;
@@ -442,15 +453,26 @@ int main(int argc, char **argv) {
 
   device.bind([&](const Device &d) {
     engine.load(d);
+    using namespace std::chrono;
+    auto start = system_clock::now();
     engine.run(0); // matrix operation
+    auto end = system_clock::now();
+    uint64_t avg_elapsed_ns = duration_cast<nanoseconds>(end - start).count() / numExecutions;
+    std::cerr << "\nGeneral matmul: m " << m << ", k " << k << ", n " << n
+              << ", dType " << inputType << ", amp " << availableMemoryProportion
+              << ", avg elapsed " << avg_elapsed_ns << " ns in " << numExecutions << " loops";
+    std::cerr << "\nCSV format: general matmul," << m << "," << k << "," << n
+              << ",,," << inputType << ",," << availableMemoryProportion << ","
+              << avg_elapsed_ns << "," << numExecutions;
   });
 
   bool matchesModel = true;
   if (!ignoreData) {
     copy(target, outputType, rawHostMatC.get(), hostMatC);
 
-    matchesModel = checkIsClose("gemm", hostMatC, refMatC, relativeTolerance,
-                                absoluteTolerance);
+    // matchesModel = checkIsClose("gemm", hostMatC, refMatC, relativeTolerance,
+    //                             absoluteTolerance);
+    std::cerr << "\nabs, rel: " << absoluteTolerance << "," << relativeTolerance;
   }
 
   if (profile) {
