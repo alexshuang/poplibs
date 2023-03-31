@@ -1,0 +1,33 @@
+# only ubuntu:20.04
+# ARG base_image
+# FROM ${base_image}
+FROM ubuntu:20.04
+
+LABEL maintainer="alexhu@graphcore.ai"
+
+# Install dependent packages
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    wget \
+    vim \
+    git \
+    python3-pip \
+    ninja-build \
+    pkg-config \
+    librdmacm-dev \
+    cmake \
+    make \
+    g++ \
+    python3.8-dev \
+    python-clang \
+    ctags \
+    ssh \
+    && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+RUN pip install requests mypy Jinja2
+
+WORKDIR /root
+COPY scripts scripts
