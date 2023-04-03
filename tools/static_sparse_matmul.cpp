@@ -40,6 +40,7 @@
 #include <optional>
 
 #include <fstream>
+// #include <assert>
 
 // Tolerances used
 #define FLOAT_REL_TOL 0.01
@@ -55,6 +56,65 @@ using namespace poplibs_support;
 using namespace popsparse;
 using namespace popsparse::dynamic;
 using namespace poputil;
+
+template <typename T, typename F>
+void writeValues(T *begin, T *end, F generator) {
+  for (auto it = begin; it != end; ++it) {
+    *it = generator();
+  }
+}
+
+template <typename T>
+void roundToHalfPrecision(const poplar::Target &target, T *begin, T *end) {
+  if constexpr (std::is_same<T, float>::value ||
+                std::is_same<T, double>::value) {
+    gccs::ArrayRef<T> user{begin, static_cast<std::size_t>(end - begin)};
+    std::vector<char> buf(user.size() * target.getTypeSize(poplar::HALF));
+    poplar::convertToDeviceType(poplar::HALF, user, buf.data());
+    poplar::convertFromDeviceType(poplar::HALF, buf.data(), user);
+  } else {
+    throw poputil::poplibs_error("Data type does not support rounding to half."
+                                 " Only float and double are supported for"
+                                 " this operation.");
+  }
+}
+
+template <typename T>
+void writeDenseValues(const Target &target, const Type &type, T *begin,
+                      T *end, const std::string& filename) {
+  std::ifstream cin(filename);
+  if (!cin.is_open()) {
+    std::cerr << "Cannot open dense data file " << filename << "\n";
+    assert(0);
+  }
+  auto cb = [&]() {
+      T value;
+      cin >> value;
+      return value;
+  };
+  if (type == poplar::FLOAT || type == poplar::HALF) {
+    writeValues(begin, end, cb);
+    if (type == poplar::HALF) {
+      if constexpr (std::is_same<T, float>::value ||
+                    std::is_same<T, double>::value) {
+        roundToHalfPrecision(target, begin, end);
+      }
+    }
+  } else if (type == poplar::QUARTER) {
+    writeValues(begin, end, cb);
+  } else {
+    throw poputil::poplibs_error("Unsupported type");
+  }
+}
+
+template <typename T>
+static void dump_vector(const std::vector<T>& v, std::string prefix) {
+  std::cerr << prefix << ", size: " << v.size() << ", data: [ ";
+  for (const auto& o: v) {
+    std::cerr << o << " ";
+  }
+  std::cerr << " ]" << std::endl;
+}
 
 using EType = float;
 bool readHeaderFromMaskFile(const std::string &fileName,
@@ -84,6 +144,47 @@ bool readHeaderFromMaskFile(const std::string &fileName,
     }
   }
   *numRows = numRowsInFile * blockLength;
+  return true;
+}
+
+bool createCSRMatrixFromMaskAndWeightFile(const std::string &MaskfileName,
+                                 const std::string &WeightfileName,
+                                 CSRMatrix<EType> &csrMatrix) {
+  std::ifstream mask_cin(MaskfileName), weight_cin(WeightfileName);
+  if (!mask_cin.is_open()) {
+    std::cerr << "Cannot open sparsity mask file " << MaskfileName << "\n";
+    return false;
+  }
+  if (!weight_cin.is_open()) {
+    std::cerr << "Cannot open weight file " << WeightfileName << "\n";
+    return false;
+  }
+  unsigned numRows, numColumns;
+  mask_cin >> numRows >> numColumns;
+  csrMatrix.nzValues.clear();
+  csrMatrix.columnIndices.clear();
+  csrMatrix.rowIndices.clear();
+  const auto blockLength = csrMatrix.getBlockDimensions()[0];
+
+  unsigned nzCount = 0;
+  unsigned isNz;
+  EType value;
+  csrMatrix.rowIndices.push_back(nzCount);
+  for (unsigned r = 0; r != numRows; r++) {
+    for (unsigned c = 0; c != numColumns; ++c) {
+      mask_cin >> isNz;
+      if (isNz) {
+        for (unsigned i = 0; i != blockLength * blockLength; ++i) {
+          weight_cin >> value;
+          csrMatrix.nzValues.push_back(value);
+        }
+        csrMatrix.columnIndices.push_back(c * blockLength);
+        nzCount += blockLength * blockLength;
+      }
+    }
+    csrMatrix.rowIndices.push_back(nzCount);
+  }
+
   return true;
 }
 
@@ -150,6 +251,8 @@ int main(int argc, char **argv) try {
   bool doDenseSparse = false;
   unsigned blockLength = 1;
   std::string sparsityFileName = "";
+  std::string weightFileName = "";
+  std::string inputFileName = "";
 
   weightedAreaBegin.val = weightedAreaEnd.val = {0, 0};
   double weightedAreaWeighting = 1.0;
@@ -219,6 +322,12 @@ int main(int argc, char **argv) try {
       po::value<std::string>(&sparsityFileName)->default_value(sparsityFileName)
       , "The file name for the sparsity mask (first line is row column "
       "followed by row major ordering of 0/1")
+    ("weight-matrix-file",
+      po::value<std::string>(&weightFileName)->default_value(weightFileName)
+      , "The file name for the nzvalues (dense-sparse mode)")
+    ("input-matrix-file",
+      po::value<std::string>(&inputFileName)->default_value(inputFileName)
+      , "The file name for the dense (dense-sparse mode)")
   ;
   // clang-format on
 
@@ -244,6 +353,8 @@ int main(int argc, char **argv) try {
   Type partialsType = dataType;
 
   const auto maskFileUsed = !sparsityFileName.empty();
+  const auto weightFileUsed = !weightFileName.empty();
+  const auto inputFileUsed = !inputFileName.empty();
 
   if (maskFileUsed) {
     if (!readHeaderFromMaskFile(sparsityFileName, m, k, blockLength)) {
@@ -320,13 +431,20 @@ int main(int argc, char **argv) try {
 
   bool useBipolarDistribution;
   if (maskFileUsed) {
-    useBipolarDistribution = true;
-    if (!createCSRMatrixFromMaskFile(sparsityFileName, csrMatrix, randomEngine,
-                                     true)) {
-      return 1;
+    if (weightFileUsed and doDenseSparse) {
+      if (!createCSRMatrixFromMaskAndWeightFile(sparsityFileName, weightFileName,
+                                                csrMatrix)) {
+        return 1;
+      }
+    } else {
+      useBipolarDistribution = true;
+      if (!createCSRMatrixFromMaskFile(sparsityFileName, csrMatrix, randomEngine,
+                                      true)) {
+        return 1;
+      }
+      sparsityFactor = static_cast<double>(csrMatrix.nzValues.size()) /
+                      (numSparseRows * numSparseColumns);
     }
-    sparsityFactor = static_cast<double>(csrMatrix.nzValues.size()) /
-                     (numSparseRows * numSparseColumns);
   } else {
     useBipolarDistribution =
         poplibs_test::sparse::floatingPointCouldRepresentMaxAccum(
@@ -340,6 +458,10 @@ int main(int argc, char **argv) try {
             {blockLength, blockLength}, sparsityFactor, weightedAreaBegin,
             weightedAreaEnd, weightedAreaWeighting, useBipolarDistribution);
   }
+
+  dump_vector<EType>(csrMatrix.nzValues, "nzValues");
+  dump_vector<std::size_t>(csrMatrix.columnIndices, "columnIndices");
+  dump_vector<std::size_t>(csrMatrix.rowIndices, "rowIndices");
 
   poplar::OptionFlags sparseOptionFlags;
   if (numBands) {
@@ -441,11 +563,17 @@ int main(int argc, char **argv) try {
 
   boost::multi_array<double, 2> hostDense(
       boost::extents[dense.dim(1)][dense.dim(2)]);
-  if (useBipolarDistribution) {
-    writeRandomBinaryValues(target, dataType, hostDense, -1.0, 1.0,
-                            randomEngine);
+  if (inputFileUsed and doDenseSparse) {
+    writeDenseValues<double>(target, dataType, hostDense.data(),
+                            hostDense.data() + hostDense.num_elements(),
+                            inputFileName);
   } else {
-    writeRandomValues(target, dataType, hostDense, -1.0, 1.0, randomEngine);
+    if (useBipolarDistribution) {
+      writeRandomBinaryValues(target, dataType, hostDense, -1.0, 1.0,
+                              randomEngine);
+    } else {
+      writeRandomValues(target, dataType, hostDense, -1.0, 1.0, randomEngine);
+    }
   }
 
   boost::multi_array<double, 2> hostOut(boost::extents[out.dim(1)][out.dim(2)]);
