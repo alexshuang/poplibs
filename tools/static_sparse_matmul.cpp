@@ -57,6 +57,24 @@ using namespace popsparse;
 using namespace popsparse::dynamic;
 using namespace poputil;
 
+template <typename T>
+static void dump_output(T *begin, T* end, const std::string& filename) {
+  std::ofstream cout(filename);
+  if (!cout.is_open()) {
+    std::cerr << "Cannot open hostOut file " << filename << "\n";
+    assert(0);
+  }
+
+  std::cerr << "hostOut: ";
+  for (auto it = begin; it != end; ++it) {
+    std::cerr << *it << " ";
+    cout << *it << " ";
+  }
+  std::cerr << std::endl;
+  cout.close();
+  std::cerr << "Save hostOut to " << filename << std::endl;
+}
+
 template <typename T, typename F>
 void writeValues(T *begin, T *end, F generator) {
   for (auto it = begin; it != end; ++it) {
@@ -562,7 +580,7 @@ int main(int argc, char **argv) try {
                                        debugString, sparseOptionFlags, &cache);
 
   prog.add(Repeat(iters, repeat_prog));
-  // prog.add(PrintTensor(out));
+  prog.add(PrintTensor("sparse matmul output", out));
   std::cerr << "\nhostOut shape: [" << out.dim(0) << ", " << out.dim(1) << ", "
             << out.dim(2) << "]";
 
@@ -611,6 +629,12 @@ int main(int argc, char **argv) try {
     writeDenseValues<double>(target, dataType, hostDense.data(),
                             hostDense.data() + hostDense.num_elements(),
                             inputFileName);
+    std::cerr << "\ninput: ";
+    for (auto it = hostDense.data();
+         it != hostDense.data() + hostDense.num_elements(); it++) {
+      std::cerr << *it << " ";
+    }
+    std::cerr << std::endl;
   } else {
     if (useBipolarDistribution) {
       writeRandomBinaryValues(target, dataType, hostDense, -1.0, 1.0,
@@ -682,6 +706,8 @@ int main(int argc, char **argv) try {
       poplibs_test::gemm::generalMatrixMultiply(hostDenseLHS, hostDense,
                                                 modelOut, false, false);
     }
+    dump_output(hostOut.data(), hostOut.data() + hostOut.num_elements(),
+                "hostout.txt");
     matchesModel &= checkIsClose("out", hostOut, modelOut, relTolerance);
   }
 
