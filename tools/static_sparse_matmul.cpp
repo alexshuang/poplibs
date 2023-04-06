@@ -65,12 +65,12 @@ static void dump_output(T *begin, T* end, const std::string& filename) {
     assert(0);
   }
 
-  std::cerr << "hostOut: ";
+  // std::cerr << "hostOut: ";
   for (auto it = begin; it != end; ++it) {
-    std::cerr << *it << " ";
+    // std::cerr << *it << " ";
     cout << *it << " ";
   }
-  std::cerr << std::endl;
+  // std::cerr << std::endl;
   cout.close();
   std::cerr << "Save hostOut to " << filename << std::endl;
 }
@@ -477,9 +477,9 @@ int main(int argc, char **argv) try {
             weightedAreaEnd, weightedAreaWeighting, useBipolarDistribution);
   }
 
-  dump_vector<EType>(csrMatrix.nzValues, "nzValues");
-  dump_vector<std::size_t>(csrMatrix.columnIndices, "columnIndices");
-  dump_vector<std::size_t>(csrMatrix.rowIndices, "rowIndices");
+  // dump_vector<EType>(csrMatrix.nzValues, "nzValues");
+  // dump_vector<std::size_t>(csrMatrix.columnIndices, "columnIndices");
+  // dump_vector<std::size_t>(csrMatrix.rowIndices, "rowIndices");
 
   poplar::OptionFlags sparseOptionFlags;
   if (numBands) {
@@ -526,6 +526,8 @@ int main(int argc, char **argv) try {
           : static_::createSparseDenseMatMulRHS(graph, dataType, matMulParams,
                                                 csrMatrix, debugString,
                                                 sparseOptionFlags, &cache);
+  prog.add(PrintTensor("input", dense));
+  prog.add(PrintTensor("nzvalues", sparse.getNzValuesTensor()));
 
   Sequence repeat_prog;
   auto out =
@@ -536,9 +538,9 @@ int main(int argc, char **argv) try {
                                        debugString, sparseOptionFlags, &cache);
 
   prog.add(Repeat(iters, repeat_prog));
-  prog.add(PrintTensor("sparse matmul output", out));
-  std::cerr << "\nhostOut shape: [" << out.dim(0) << ", " << out.dim(1) << ", "
-            << out.dim(2) << "]";
+  prog.add(PrintTensor("output", out));
+  // std::cerr << "\nhostOut shape: [" << out.dim(0) << ", " << out.dim(1) << ", "
+  //           << out.dim(2) << "]";
 
   std::vector<std::pair<std::string, HostMemory>> tmap;
   auto rawNzInfo =
