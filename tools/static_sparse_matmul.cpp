@@ -635,12 +635,14 @@ int main(int argc, char **argv) try {
     writeDenseValues<double>(target, dataType, hostDense.data(),
                             hostDense.data() + hostDense.num_elements(),
                             inputFileName);
+    /*
     std::cerr << "\ninput: ";
     for (auto it = hostDense.data();
          it != hostDense.data() + hostDense.num_elements(); it++) {
       std::cerr << *it << " ";
     }
     std::cerr << std::endl;
+    */
   } else {
     if (useBipolarDistribution) {
       writeRandomBinaryValues(target, dataType, hostDense, -1.0, 1.0,
