@@ -57,13 +57,17 @@ using namespace popsparse;
 using namespace popsparse::dynamic;
 using namespace poputil;
 
+#define PRECISION 8
+
 template <typename T>
-static void dump_output(T *begin, T* end, const std::string& filename) {
+static void dump_output(T *begin, T* end, const std::string& filename, int precision) {
   std::ofstream cout(filename);
   if (!cout.is_open()) {
     std::cerr << "Cannot open hostOut file " << filename << "\n";
     assert(0);
   }
+
+  cout.precision(precision);
 
   // std::cerr << "hostOut: ";
   for (auto it = begin; it != end; ++it) {
@@ -665,7 +669,7 @@ int main(int argc, char **argv) try {
                                                 modelOut, false, false);
     }
     dump_output(hostOut.data(), hostOut.data() + hostOut.num_elements(),
-                "hostout.txt");
+                "hostout.txt", PRECISION);
     matchesModel &= checkIsClose("out", hostOut, modelOut, relTolerance);
   }
 
