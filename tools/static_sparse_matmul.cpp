@@ -190,18 +190,29 @@ bool createCSRMatrixFromMaskAndWeightFile(const std::string &MaskfileName,
   csrMatrix.columnIndices.clear();
   csrMatrix.rowIndices.clear();
   const auto blockLength = csrMatrix.getBlockDimensions()[0];
+  const auto blockArea = blockLength * blockLength;
+
+  boost::multi_array<float, 3> weight(
+    boost::extents[numRows][numColumns][blockArea]);
+  float value;
+  for (unsigned int i = 0; i < numRows; i++) {
+    for (unsigned int j = 0; j < numColumns; j++) {
+      for (unsigned int k = 0; k < blockArea; k++) {
+        weight_cin >> value;
+        weight[i][j][k] = value;
+      }
+    }
+  }
 
   unsigned nzCount = 0;
   unsigned isNz;
-  EType value;
   csrMatrix.rowIndices.push_back(nzCount);
   for (unsigned r = 0; r != numRows; r++) {
     for (unsigned c = 0; c != numColumns; ++c) {
       mask_cin >> isNz;
       if (isNz) {
-        for (unsigned i = 0; i != blockLength * blockLength; ++i) {
-          weight_cin >> value;
-          csrMatrix.nzValues.push_back(value);
+        for (unsigned i = 0; i != blockArea; ++i) {
+          csrMatrix.nzValues.push_back(weight[r][c][i]);
         }
         csrMatrix.columnIndices.push_back(c * blockLength);
         nzCount += blockLength * blockLength;
@@ -210,6 +221,8 @@ bool createCSRMatrixFromMaskAndWeightFile(const std::string &MaskfileName,
     csrMatrix.rowIndices.push_back(nzCount);
   }
 
+  mask_cin.close();
+  weight_cin.close();
   return true;
 }
 
