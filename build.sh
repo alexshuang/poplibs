@@ -3,4 +3,4 @@
 set -ex
 
 cd build
-ninja -j64
+ninja -j64 install
