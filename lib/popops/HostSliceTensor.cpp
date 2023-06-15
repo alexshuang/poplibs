@@ -170,9 +170,13 @@ static void assignTileMappings(const PacketsAndIndices &packets,
   assert(packets.packets.size() % indices.dim(0) == 0);
   assert(indices.rank() == 1);
   assert(packets.packets.size() == packets.indices.size());
-  const auto packetsPerTile =
+  auto packetsPerTile =
       numPacketsPerTile(xbs, graph.getTarget(), packets.packets.size());
   const auto numTiles = graph.getTarget().getNumTiles();
+  static std::size_t next_start_offset = 0;
+  std::rotate(packetsPerTile.rbegin(),
+              packetsPerTile.rbegin() + next_start_offset,
+              packetsPerTile.rend());
   auto packetCounter = 0U;
   unsigned lastIndex = ~0U;
   for (unsigned tile = 0; tile < numTiles; ++tile) {
@@ -188,6 +192,7 @@ static void assignTileMappings(const PacketsAndIndices &packets,
     }
     packetCounter += packetsPerTile[tile];
   }
+  next_start_offset = (next_start_offset + packetCounter) % numTiles;
 }
 
 static void createPerIpuTensors(std::vector<poplar::Tensor> &toConcat,
