@@ -11,6 +11,7 @@
 #include <gccs/Algorithm.hpp>
 
 #include <unordered_map>
+#include <iostream>
 
 using namespace poplibs_support;
 
@@ -66,6 +67,7 @@ struct XBs {
 struct PacketsAndIndices {
   std::vector<poplar::Tensor> packets;
   std::vector<unsigned> indices;
+  size_t offset;
 };
 
 } // namespace
@@ -117,12 +119,14 @@ static XBs findAvailableXBs(const poplar::Graph &graph) {
 // we will again, so we leave `isRead` plumbed into this function
 static PacketsAndIndices splitIntoPackets(poplar::Tensor &t,
                                           const poplar::Graph &graph,
-                                          const bool isRead) {
+                                          const bool isRead,
+                                          const size_t offset) {
   const unsigned packetSize =
       packetSizeInBytes / graph.getTarget().getTypeSize(t.elementType());
   PacketsAndIndices result;
   result.packets.reserve(t.numElements() / packetSize);
   result.indices.reserve(t.numElements() / packetSize);
+  result.offset = gccs::ceildiv(offset, packetSizeInBytes);
   std::unordered_map<unsigned, unsigned> sizeBreakDown;
   for (unsigned i = 0; i < t.dim(0); ++i) {
     // the outer dimension is for the offset tensor so can't be in same packet
@@ -148,31 +152,42 @@ static PacketsAndIndices splitIntoPackets(poplar::Tensor &t,
 
 static std::vector<unsigned> numPacketsPerTile(const XBs &xbs,
                                                const poplar::Target &target,
-                                               const unsigned numPackets) {
+                                               const unsigned numPackets,
+                                               const size_t offsetPackets) {
   // assign tiles a roughly even amount of packets each but if some tiles have
   // extra try and fill a different xb context for each one
   std::vector<unsigned> result(target.getNumTiles(),
                                numPackets / target.getNumTiles());
   const unsigned extra = numPackets % target.getNumTiles();
+  const size_t offset = offsetPackets % target.getNumTiles();
   auto xbIt = xbs.xbToTiles.begin();
   unsigned tileCounter = 0;
   for (unsigned i = 0; i < extra; ++i) {
     const auto tile = xbIt->second[tileCounter];
-    ++result[tile];
+    const auto j = (offset + tile) % target.getNumTiles();
+    ++result[j];
     xbs.findNextIterators(xbIt, tileCounter);
   }
   return result;
 }
 
+// template <typename T>
+// static void rotateRight(T &t, size_t spaces) {
+//   std::rotate(t.rbegin(), t.rbegin() + spaces, t.rend());
+// }
+
 static void assignTileMappings(const PacketsAndIndices &packets,
                                const poplar::Tensor &indices, const XBs &xbs,
-                               poplar::Graph &graph) {
+                               const size_t offset, poplar::Graph &graph) {
   assert(packets.packets.size() % indices.dim(0) == 0);
   assert(indices.rank() == 1);
   assert(packets.packets.size() == packets.indices.size());
   const auto packetsPerTile =
-      numPacketsPerTile(xbs, graph.getTarget(), packets.packets.size());
+      numPacketsPerTile(xbs, graph.getTarget(), packets.packets.size(),
+                        packets.offset);
   const auto numTiles = graph.getTarget().getNumTiles();
+  // const auto start_index = packets.offset % numTiles;
+  // rotateRight(packetsPerTile, start_index);
   auto packetCounter = 0U;
   unsigned lastIndex = ~0U;
   for (unsigned tile = 0; tile < numTiles; ++tile) {
@@ -194,7 +209,7 @@ static void createPerIpuTensors(std::vector<poplar::Tensor> &toConcat,
                                 std::vector<poplar::Tensor> &indicesToConcat,
                                 poplar::Graph &graph, const poplar::Type &type,
                                 const std::vector<size_t> &shape,
-                                const bool isRead,
+                                const bool isRead, const size_t offset,
                                 const poplar::DebugNameAndId &dnai) {
   assert(graph.getTarget().getNumIPUs() == 1U);
   toConcat.emplace_back(
@@ -204,13 +219,14 @@ static void createPerIpuTensors(std::vector<poplar::Tensor> &toConcat,
   const auto xbs = findAvailableXBs(graph);
   auto &t = toConcat.back();
   auto &indices = indicesToConcat.back();
-  const auto packets = splitIntoPackets(t, graph, isRead);
-  assignTileMappings(packets, indices, xbs, graph);
+  const auto packets = splitIntoPackets(t, graph, isRead, offset);
+  assignTileMappings(packets, indices, xbs, offset, graph);
 }
 
 IndicesAndTensor
 createHostSliceableTensor(poplar::Graph &graph, const poplar::Type &type,
                           const std::vector<size_t> &shape, const bool isRead,
+                          const size_t offset,
                           const poplar::DebugContext &debugContext) {
   POPOPS_TRACEPOINT();
   poputil::PoplibsOpDebugInfo di(debugContext, DI_ARGS(type, shape, isRead));
@@ -231,7 +247,7 @@ createHostSliceableTensor(poplar::Graph &graph, const poplar::Type &type,
   for (unsigned i = 0; i < numIpus; ++i) {
     auto ipuGraph = getIpuGraph(graph, target, i);
     createPerIpuTensors(toConcat, indicesToConcat, ipuGraph, type,
-                        perIpuShapes[i], isRead, {di});
+                        perIpuShapes[i], isRead, offset, {di});
   }
   const auto result = concat(toConcat);
   const auto indices = concat(indicesToConcat);
@@ -241,9 +257,49 @@ createHostSliceableTensor(poplar::Graph &graph, const poplar::Type &type,
   return {indices, result};
 }
 
+// static unsigned getStartTile(const std::vector<std::vector<Interval>> &ans,
+//                             const bool print = false /*for debugging*/) {
+//   unsigned start_index = 0;
+//   if (print) {
+//     std::cout << "Printin start tile\n";
+//   }
+//   for (unsigned i = 0; i < ans.size(); ++i) {
+//     if (!ans[i].empty()) {
+//       start_index = i;
+//       if (print) {
+//         std::cout << i;
+//       }
+//       break;
+//     }
+//   }
+//   if (print) {
+//     std::cout << std::endl;
+//   }
+//   return start_index;
+// }
+
+// static unsigned getNumTiles(const std::vector<std::vector<poplar::Interval>> &ans,
+//                             const bool print = false /*for debugging*/) {
+//   unsigned count = 0;
+//   if (print) {
+//     std::cout << "Printin used tiles\n";
+//   }
+//   for (unsigned i = 0; i < ans.size(); ++i) {
+//     count += (!ans[i].empty());
+//     if (print && !ans[i].empty()) {
+//       std::cout << i << ",";
+//     }
+//   }
+//   if (print) {
+//     std::cout << std::endl;
+//   }
+//   return count;
+// }
+
 poplar::Tensor
 createHostTransferableTensor(poplar::Graph &graph, const poplar::Type &type,
                              const std::vector<size_t> &shape, bool isRead,
+                             const size_t offset,
                              const poplar::DebugContext &debugContext) {
   POPOPS_TRACEPOINT();
   poputil::PoplibsOpDebugInfo di(debugContext, DI_ARGS(type, shape, isRead));
@@ -251,11 +307,24 @@ createHostTransferableTensor(poplar::Graph &graph, const poplar::Type &type,
   size_t flattenedSize = std::accumulate(shape.begin(), shape.end(), 1U,
                                          std::multiplies<size_t>());
   auto resultPair =
-      createHostSliceableTensor(graph, type, {1, flattenedSize}, isRead, {di});
+      createHostSliceableTensor(graph, type, {1, flattenedSize}, isRead, offset, {di});
+
+  // auto m0 = graph.getTileMapping(resultPair.tensor);
+  // auto i0 = graph.getTileMapping(resultPair.indices);
+  // std::cout << "getNumTiles(m0): " << getNumTiles(m0) << std::endl;
+  // std::cout << "getNumTiles(i0): " << getNumTiles(i0) << std::endl;
 
   auto output = resultPair.tensor.reshape(shape);
   di.addOutput(output);
   return output;
+}
+
+poplar::Tensor
+createHostTransferableTensor(poplar::Graph &graph, const poplar::Type &type,
+                             const std::vector<size_t> &shape, bool isRead,
+                             const poplar::DebugContext &debugContext) {
+  return createHostTransferableTensor(graph, type, shape, isRead, 0,
+                                      debugContext);
 }
 
 } // namespace popops

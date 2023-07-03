@@ -41,6 +41,7 @@ struct IndicesAndTensor {
 IndicesAndTensor
 createHostSliceableTensor(poplar::Graph &graph, const poplar::Type &type,
                           const std::vector<size_t> &shape, const bool isRead,
+                          const size_t offset = 0,
                           const poplar::DebugContext &debugContext = {});
 
 /// Create a tensor that is well laid out for a host exchange copy.
@@ -56,6 +57,22 @@ createHostSliceableTensor(poplar::Graph &graph, const poplar::Type &type,
 poplar::Tensor
 createHostTransferableTensor(poplar::Graph &graph, const poplar::Type &type,
                              const std::vector<size_t> &shape, bool isRead,
+                             const poplar::DebugContext &debugContext = {});
+
+/// Create a tensor that is well laid out for a host exchange copy.
+/// \param graph  The graph to add the tensor to.
+/// \param type   The element type of the tensor created.
+/// \param shape  The shape of the tensor created.
+/// \param isRead If true, the tensor will be read by the host. If false,
+///               the tensor data will be written to the host. Setting \p isRead
+///               to true is likely to make the read operation faster without
+///               affecting the write, but is also likely to cause greater tile
+///               imbalance.
+/// \return       The tensor created.
+poplar::Tensor
+createHostTransferableTensor(poplar::Graph &graph, const poplar::Type &type,
+                             const std::vector<size_t> &shape, bool isRead,
+                             const size_t offset = 0,
                              const poplar::DebugContext &debugContext = {});
 
 } // namespace popops
